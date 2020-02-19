@@ -1,0 +1,29 @@
+<head>
+	<script src="abcjs_basic_6.0.0-beta.2.js" type="text/javascript"></script>
+
+</head>
+<div>
+	<textarea>
+		
+	</textarea>
+<a href="#" onclick="doit();">render</a>
+</div>
+<div id="paper"></div>
+<script type="text/javascript">
+	function doit(){
+		var visualObj = ABCJS.renderAbc('paper',document.getElementsByTagName('textarea')[0].value);
+		console.log(visualObj);
+		var myContext = new AudioContext();
+		var synth = new ABCJS.synth.CreateSynth();
+		synth.init({
+			audioContext: myContext,
+			visualObj: visualObj[0],
+			millisecondsPerMeasure: 5000
+		}).then(()=>{
+			synth.prime().then(()=>{
+				synth.start();
+			
+		})});
+	}
+
+</script>
