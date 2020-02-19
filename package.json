@@ -55,6 +55,6 @@
   },
   "dependencies": {
     "abcjs": "6.0.0-beta.2",
-    "midi": "https://github.com/paulrosen/MIDI.js.git#abcjs"
+    "midi": "git+https://github.com/hdouss/MIDI.js.git#abcjs"
   }
 }
