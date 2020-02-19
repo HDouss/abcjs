@@ -8411,6 +8411,14 @@ var parseDirective = {};
     } else size = parseFloat(size);
 
     face = face.join(' ');
+
+    if (face === '') {
+      if (!currentSetting) {
+        warn("Must specify the name of the font since there is no default value.", str, position);
+        face = "sans-serif";
+      } else face = currentSetting.face;
+    }
+
     var psFont = fontTranslation(face);
     var font = {};
 
@@ -13680,14 +13688,18 @@ var createNoteMap = function createNoteMap(sequence) {
           break;
 
         case "stop":
-          map[i].push({
-            pitch: ev.pitch,
-            instrument: nextNote[ev.pitch].instrument,
-            start: nextNote[ev.pitch].time,
-            end: currentTime,
-            volume: nextNote[ev.pitch].volume
-          });
-          delete nextNote[ev.pitch];
+          if (nextNote[ev.pitch]) {
+            // If unisons are requested, then there might be two starts and two stops for the same note. Only use one of them.
+            map[i].push({
+              pitch: ev.pitch,
+              instrument: nextNote[ev.pitch].instrument,
+              start: nextNote[ev.pitch].time,
+              end: currentTime,
+              volume: nextNote[ev.pitch].volume
+            });
+            delete nextNote[ev.pitch];
+          }
+
           break;
 
         case "program":
@@ -16194,16 +16206,20 @@ var AbstractEngraver;
       this.createABCVoice(abcstaff.voices[v], tempo, s, v, isSingleLineStaff, voice);
       staffgroup.setStaffLimits(voice);
 
-      if (abcstaff.brace === "start") {
+      if (abcstaff.brace === "start" || !staffgroup.brace && abcstaff.brace) {
         staffgroup.brace = new BraceElem(voice.staff, "brace");
       } else if (abcstaff.brace === "end" && staffgroup.brace) {
         staffgroup.brace.setBottomStaff(voice.staff);
+      } else if (abcstaff.brace === "continue" && staffgroup.brace) {
+        staffgroup.brace.continuing(voice.staff);
       }
 
-      if (abcstaff.bracket === "start") {
+      if (abcstaff.bracket === "start" || !staffgroup.bracket && abcstaff.bracket) {
         staffgroup.bracket = new BraceElem(voice.staff, "bracket");
       } else if (abcstaff.bracket === "end" && staffgroup.bracket) {
         staffgroup.bracket.setBottomStaff(voice.staff);
+      } else if (abcstaff.bracket === "continue" && staffgroup.bracket) {
+        staffgroup.bracket.continuing(voice.staff);
       }
     }
   };
@@ -17575,13 +17591,24 @@ var BeamElem;
 
     var durationClass = ("abcjs-d" + this.duration).replace(/\./g, "-");
     var klasses = renderer.addClasses('beam-elem ' + durationClass);
-    renderer.printPath({
+    renderer.controller.currentAbsEl = {
+      tuneNumber: renderer.controller.engraver.tuneNumber,
+      elemset: [],
+      abcelem: {
+        el_type: "beam",
+        startChar: -1,
+        endChar: -1
+      }
+    };
+    var el = renderer.printPath({
       path: pathString,
       stroke: "none",
       fill: "#000000",
-      'class': klasses,
-      notSelectable: true
+      'class': klasses
+    }, {
+      history: 'not-selectable'
     });
+    renderer.controller.currentAbsEl.elemset.push(el);
   }; //
   // private functions
   //
@@ -17794,6 +17821,11 @@ BraceElem.prototype.setBottomStaff = function (staff) {
   this.endStaff = staff;
 };
 
+BraceElem.prototype.continuing = function (staff) {
+  // If the final staff isn't present, then use the last one we saw.
+  this.lastContinuedStaff = staff;
+};
+
 BraceElem.prototype.setLocation = function (x) {
   this.x = x;
 };
@@ -17811,7 +17843,7 @@ BraceElem.prototype.draw = function (renderer, top, bottom) {
   // The absoluteY number is the spot where the note on the first ledger line is drawn (i.e. middle C if treble clef)
   // The STEP offset here moves it to the top and bottom lines
   this.startY = this.startStaff.absoluteY - spacing.STEP * 10;
-  this.endY = this.endStaff.absoluteY - spacing.STEP * 2;
+  if (this.endStaff) this.endY = this.endStaff.absoluteY - spacing.STEP * 2;else if (this.lastContinuedStaff) this.endY = this.lastContinuedStaff.absoluteY - spacing.STEP * 2;else this.endY = this.startStaff.absoluteY - spacing.STEP * 2;
   this.drawBrace(renderer, this.x, this.startY, this.endY);
 };
 
@@ -18293,12 +18325,23 @@ CrescendoElem.prototype.drawLine = function (renderer, y1, y2, y3, y4) {
   // TODO-PER: This is just a quick hack to make the dynamic marks not crash if they are mismatched. See the slur treatment for the way to get the beginning and end.
   var left = this.anchor1 ? this.anchor1.x : 0;
   var right = this.anchor2 ? this.anchor2.x : 800;
+  var type = this.dir === "<" ? "crescendo" : "diminuendo";
   var pathString = sprintf("M %f %f L %f %f M %f %f L %f %f", left, y1, right, y2, left, y3, right, y4);
-  renderer.printPath({
+  renderer.controller.currentAbsEl = {
+    tuneNumber: renderer.controller.engraver.tuneNumber,
+    elemset: [],
+    abcelem: {
+      el_type: type,
+      startChar: -1,
+      endChar: -1
+    }
+  };
+  var el = renderer.printPath({
     path: pathString,
     stroke: "#000000",
     'class': renderer.addClasses('dynamics decoration')
   });
+  renderer.controller.currentAbsEl.elemset.push(el);
 };
 
 module.exports = CrescendoElem;
@@ -18756,11 +18799,20 @@ DynamicDecoration.prototype.setUpperAndLowerElements = function (positionY) {
   if (this.volumeHeightAbove) this.pitch = positionY.volumeHeightAbove;else this.pitch = positionY.volumeHeightBelow;
 };
 
-DynamicDecoration.prototype.draw = function (renderer, linestartx, lineendx) {
+DynamicDecoration.prototype.draw = function (renderer) {
   if (this.pitch === undefined) window.console.error("Dynamic Element y-coordinate not set.");
   var scalex = 1;
   var scaley = 1;
-  renderer.printSymbol(this.anchor.x, this.pitch, this.dec, scalex, scaley, renderer.addClasses('decoration'));
+  var self = this;
+  var ret = renderer.wrapInAbsElem({
+    el_type: "dynamic-decoration",
+    startChar: -1,
+    endChar: -1,
+    decoration: this.dec
+  }, 'abcjs-decoration', function () {
+    var el = renderer.printSymbol(self.anchor.x, self.pitch, self.dec, scalex, scaley, renderer.addClasses('decoration'));
+    return el;
+  });
 };
 
 module.exports = DynamicDecoration;
@@ -18810,38 +18862,51 @@ EndingElem.prototype.draw = function (renderer, linestartx, lineendx) {
   if (this.pitch === undefined) window.console.error("Ending Element y-coordinate not set.");
   var y = renderer.calcY(this.pitch);
   var height = 20;
-  var pathString;
+  var pathString = '';
 
   if (this.anchor1) {
     linestartx = this.anchor1.x + this.anchor1.w;
-    pathString = sprintf("M %f %f L %f %f", linestartx, y, linestartx, y + height);
-    renderer.printPath({
-      path: pathString,
-      stroke: "#000000",
-      fill: "#000000",
-      'class': renderer.addClasses('ending')
-    });
-    renderer.renderText(linestartx + 5, renderer.calcY(this.pitch - 0.5), this.text, 'repeatfont', 'ending', "start");
+    pathString += sprintf("M %f %f L %f %f ", linestartx, y, linestartx, y + height);
   }
 
   if (this.anchor2) {
     lineendx = this.anchor2.x;
-    pathString = sprintf("M %f %f L %f %f", lineendx, y, lineendx, y + height);
+    pathString += sprintf("M %f %f L %f %f ", lineendx, y, lineendx, y + height);
+  }
+
+  pathString += sprintf("M %f %f L %f %f ", linestartx, y, lineendx, y);
+  var self = this;
+  var g;
+  var ret = renderer.wrapInAbsElem({
+    el_type: "ending",
+    startChar: -1,
+    endChar: -1
+  }, 'abcjs-ending', function () {
+    renderer.createElemSet({
+      klass: renderer.addClasses("ending")
+    });
     renderer.printPath({
       path: pathString,
       stroke: "#000000",
-      fill: "#000000",
-      'class': renderer.addClasses('ending')
+      fill: "#000000"
+    }, {
+      history: 'ignore'
     });
-  }
-
-  pathString = sprintf("M %f %f L %f %f", linestartx, y, lineendx, y);
-  renderer.printPath({
-    path: pathString,
-    stroke: "#000000",
-    fill: "#000000",
-    'class': renderer.addClasses('ending')
+    if (self.anchor1) renderer.renderText({
+      x: linestartx + 5,
+      y: renderer.calcY(self.pitch - 0.5),
+      text: self.text,
+      type: 'repeatfont',
+      klass: 'ending',
+      anchor: "start",
+      noClass: true,
+      history: 'ignore'
+    });
+    g = renderer.closeElemSet();
+    renderer.controller.recordHistory(g, false);
+    return g;
   });
+  return g;
 };
 
 module.exports = EndingElem;
@@ -19430,8 +19495,8 @@ var glyphs = {
     h: 18.801
   },
   'accidentals.halfflat': {
-    d: [['M', 4.83, -14.07], ['c', 0.33, -0.06, 0.87, 0.00, 1.08, 0.15], ['c', 0.06, 0.03, 0.06, 0.60, -0.12, 9.06], ['c', -0.09, 5.55, -0.15, 9.06, -0.18, 9.12], ['c', -0.03, 0.09, -0.09, 0.18, -0.15, 0.27], ['c', -0.24, 0.21, -0.54, 0.24, -0.81, 0.06], ['c', -0.06, -0.03, -0.27, -0.24, -0.45, -0.42], ['c', -0.36, -0.42, -0.66, -0.66, -1.80, -1.44], ['c', -1.23, -0.84, -1.83, -1.32, -2.25, -1.77], ['c', -0.66, -0.78, -0.96, -1.56, -0.93, -2.46], ['c', 0.09, -1.41, 1.11, -2.58, 2.40, -2.79], ['c', 0.30, -0.06, 0.84, -0.03, 1.23, 0.06], ['c', 0.54, 0.12, 1.08, 0.33, 1.53, 0.63], ['c', 0.12, 0.09, 0.24, 0.15, 0.24, 0.12], ['c', 0.00, 0.00, -0.12, -8.37, -0.18, -9.75], ['l', 0.00, -0.66], ['l', 0.12, -0.06], ['c', 0.06, -0.03, 0.18, -0.09, 0.27, -0.12], ['z'], ['m', -1.65, 10.95], ['c', -0.60, -0.18, -1.08, 0.09, -1.38, 0.69], ['c', -0.27, 0.60, -0.36, 1.38, -0.18, 2.07], ['c', 0.12, 0.42, 0.42, 0.99, 0.72, 1.41], ['c', 0.30, 0.42, 0.93, 1.05, 1.56, 1.59], ['l', 0.48, 0.39], ['l', 0.00, -0.12], ['c', 0.03, -0.09, 0.03, -0.48, 0.06, -0.90], ['c', 0.03, -0.57, 0.03, -1.08, 0.00, -2.22], ['c', -0.03, -1.62, -0.03, -1.62, -0.24, -2.07], ['c', -0.21, -0.42, -0.60, -0.75, -1.02, -0.84], ['z']],
-    w: 6.728,
+    d: [["M", 2.64, -14.07], ["c", -0.09, 0.03, -0.21, 0.09, -0.27, 0.12], ["c", 0, 0, -0.12, 0.06, -0.12, 0.06], ["c", 0, 0, 0, 0.78, 0, 0.78], ["c", 0.02, 0.27, -0.02, 2, 0.02, 4.24], ["c", 0, 0.18, -0.67, 0.34, -3.07, 1.74], ["c", -0.8, 0.46, -0.47, 1.53, 0.4, 1], ["c", 2.33, -1.27, 2.8, -1.65, 2.8, -1.47], ["c", 0.02, 1.14, 0, 2.23, 0.03, 3.52], ["c", 0.09, 5.07, 0.15, 8.28, 0.18, 8.34], ["c", 0.03, 0.09, 0.09, 0.18, 0.15, 0.27], ["c", 0.24, 0.21, 0.54, 0.24, 0.81, 0.06], ["c", 0.06, -0.03, 0.27, -0.24, 0.45, -0.42], ["c", 0.36, -0.42, 0.66, -0.66, 1.8, -1.44], ["c", 1.8, -1.23, 2.4, -1.8, 2.82, -2.61], ["c", 0.27, -0.54, 0.39, -1.05, 0.36, -1.62], ["c", -0.06, -0.78, -0.36, -1.5, -0.93, -2.04], ["c", -0.57, -0.57, -1.23, -0.81, -2.04, -0.78], ["c", -0.78, 0.06, -1.56, 0.3, -2.19, 0.72], ["c", -0.12, 0.09, -0.24, 0.15, -0.24, 0.12], ["c", 0, 0, 0.01, -1.87, 0.07, -4.72], ["c", 0, -0.09, 1.06, -0.6, 5.33, -3.13], ["c", 0.8, -0.4, 0.27, -1.34, -0.33, -0.94], ["c", -4.14, 2.34, -4.94, 2.72, -4.94, 2.6], ["c", 0.08, -4.16, 0.05, -4.22, -0.01, -4.25], ["c", -0.21, -0.15, -0.75, -0.21, -1.08, -0.15], ["c", 0, 0, 0, 0, 0, 0], ["z"], ["m", 3.18, 11.01], ["c", 0.27, 0.12, 0.45, 0.33, 0.6, 0.63], ["c", 0.27, 0.6, 0.36, 1.38, 0.18, 2.07], ["c", -0.12, 0.42, -0.42, 0.99, -0.72, 1.41], ["c", -0.3, 0.42, -0.93, 1.05, -1.56, 1.59], ["c", 0, 0, -0.45, 0.39, -0.45, 0.39], ["c", 0, 0, -0.03, -0.12, -0.03, -0.12], ["c", -0.03, -0.09, -0.03, -0.48, -0.06, -0.9], ["c", -0.06, -0.99, 0, -3.57, 0.06, -3.87], ["c", 0.18, -0.63, 0.63, -1.11, 1.17, -1.26], ["c", 0.27, -0.09, 0.6, -0.06, 0.81, 0.06], ["c", 0, 0, 0, 0, 0, 0], ["z"]],
+    w: 10.661,
     h: 18.801
   },
   'accidentals.dblflat': {
@@ -20079,35 +20144,97 @@ RelativeElement.prototype.draw = function (renderer, bartop) {
       break;
 
     case "debug":
-      this.graphelem = renderer.renderText(this.x, renderer.calcY(15), "" + this.c, "debugfont", 'debug-msg', 'start', false, true);
+      this.graphelem = renderer.renderText({
+        x: this.x,
+        y: renderer.calcY(15),
+        text: "" + this.c,
+        type: "debugfont",
+        klass: 'debug-msg',
+        anchor: 'start',
+        centerVertically: false,
+        history: 'not-selectable'
+      });
       break;
 
     case "barNumber":
-      this.graphelem = renderer.renderText(this.x, y, "" + this.c, "measurefont", 'bar-number', "middle", false, true);
+      this.graphelem = renderer.renderText({
+        x: this.x,
+        y: y,
+        text: "" + this.c,
+        type: "measurefont",
+        klass: 'bar-number',
+        anchor: "middle",
+        history: 'ignore'
+      });
       break;
 
     case "lyric":
-      this.graphelem = renderer.renderText(this.x, y, this.c, "vocalfont", 'lyric', "middle");
+      this.graphelem = renderer.renderText({
+        x: this.x,
+        y: y,
+        text: this.c,
+        type: "vocalfont",
+        klass: 'lyric',
+        anchor: "middle"
+      });
       break;
 
     case "chord":
-      this.graphelem = renderer.renderText(this.x, y, this.c, 'gchordfont', "chord", "middle");
+      this.graphelem = renderer.renderText({
+        x: this.x,
+        y: y,
+        text: this.c,
+        type: 'gchordfont',
+        klass: "chord",
+        anchor: "middle"
+      });
       break;
 
     case "decoration":
-      this.graphelem = renderer.renderText(this.x, y, this.c, 'annotationfont', "annotation", "middle", true);
+      this.graphelem = renderer.renderText({
+        x: this.x,
+        y: y,
+        text: this.c,
+        type: 'annotationfont',
+        klass: "annotation",
+        anchor: "middle",
+        centerVertically: true
+      });
       break;
 
     case "text":
-      this.graphelem = renderer.renderText(this.x, y, this.c, 'annotationfont', "annotation", "start", this.centerVertically);
+      this.graphelem = renderer.renderText({
+        x: this.x,
+        y: y,
+        text: this.c,
+        type: 'annotationfont',
+        klass: "annotation",
+        anchor: "start",
+        centerVertically: this.centerVertically
+      });
       break;
 
     case "multimeasure-text":
-      this.graphelem = renderer.renderText(this.x + this.w / 2, y, this.c, 'tempofont', "rest", "middle", false);
+      this.graphelem = renderer.renderText({
+        x: this.x + this.w / 2,
+        y: y,
+        text: this.c,
+        type: 'tempofont',
+        klass: "rest",
+        anchor: "middle",
+        centerVertically: false
+      });
       break;
 
     case "part":
-      this.graphelem = renderer.renderText(this.x, y, this.c, 'partsfont', "part", "start");
+      this.graphelem = renderer.renderText({
+        x: this.x,
+        y: y,
+        text: this.c,
+        type: 'partsfont',
+        klass: "part",
+        anchor: "start"
+      });
       break;
 
     case "bar":
@@ -20625,12 +20752,12 @@ Renderer.prototype.engraveExtraText = function (width, abctune) {
       this.moveY(this.spacing.words, 1);
       var historyLen = this.controller.history.length;
       this.createElemSet({
-        klass: "abcjs-unaligned-words"
+        klass: "abcjs-meta-bottom abcjs-unaligned-words"
       });
 
       for (var j = 0; j < abctune.metaText.unalignedWords.length; j++) {
         if (abctune.metaText.unalignedWords[j] === '') this.moveY(hash.font.size, 1);else if (typeof abctune.metaText.unalignedWords[j] === 'string') {
-          this.outputTextIf(this.padding.left + spacing.INDENT, abctune.metaText.unalignedWords[j], 'wordsfont', 'meta-bottom unaligned-words', 0, 0, "start");
+          this.outputTextIf(this.padding.left + spacing.INDENT, abctune.metaText.unalignedWords[j], 'wordsfont', 'meta-bottom unaligned-words', 0, 0, "start", true);
         } else {
           var largestY = 0;
           var offsetX = 0;
@@ -20638,7 +20765,15 @@ Renderer.prototype.engraveExtraText = function (width, abctune) {
           for (var k = 0; k < abctune.metaText.unalignedWords[j].length; k++) {
             var thisWord = abctune.metaText.unalignedWords[j][k];
             var type = thisWord.font ? thisWord.font : "wordsfont";
-            this.renderText(this.padding.left + spacing.INDENT + offsetX, this.y, thisWord.text, type, 'meta-bottom unaligned-words', false);
+            this.renderText({
+              x: this.padding.left + spacing.INDENT + offsetX,
+              y: this.y,
+              text: thisWord.text,
+              type: type,
+              klass: 'meta-bottom unaligned-words',
+              anchor: 'start',
+              noClass: true
+            });
             var size = this.getTextSize(thisWord.text, type, 'meta-bottom unaligned-words');
             largestY = Math.max(largestY, size.height);
             offsetX += size.width; // If the phrase ends in a space, then that is not counted in the width, so we need to add that in ourselves.
@@ -20677,7 +20812,6 @@ Renderer.prototype.engraveExtraText = function (width, abctune) {
       endChar: -1
     }, 'meta-bottom extra-text', function () {
       var el = this.outputTextIf(this.padding.left, extraText, 'historyfont', 'meta-bottom extra-text', this.spacing.info, 0, "start");
-      this.controller.recordHistory(el[2]);
       return el[2];
     });
   }
@@ -20702,11 +20836,6 @@ Renderer.prototype.engraveExtraText = function (width, abctune) {
     if (el[2]) this.controller.currentAbsEl.elemset.push(el[2]);
   }
 };
-/**
- * Output text defined with %%text.
- * @param {array or string} text
- */
-
 
 Renderer.prototype.outputFreeText = function (text, vskip) {
   if (vskip) this.moveY(vskip);
@@ -20819,8 +20948,6 @@ Renderer.prototype.endGroup = function (klass) {
 
 
 Renderer.prototype.printStaveLine = function (x1, x2, pitch, klass) {
-  var extraClass = "staff";
-  if (klass !== undefined) extraClass += " " + klass;
   var isIE =
   /*@cc_on!@*/
   false; //IE detector
@@ -20835,12 +20962,13 @@ Renderer.prototype.printStaveLine = function (x1, x2, pitch, klass) {
 
   var y = this.calcY(pitch);
   var pathString = sprintf("M %f %f L %f %f L %f %f L %f %f z", x1, y - dy, x2, y - dy, x2, y + dy, x1, y + dy);
-  var ret = this.paper.pathToBack({
+  var options = {
     path: pathString,
     stroke: "none",
-    fill: fill,
-    'class': this.addClasses(extraClass)
-  });
+    fill: fill
+  };
+  if (klass) options['class'] = klass;
+  var ret = this.paper.pathToBack(options);
   if (this.doRegression) this.addToRegression(ret);
   return ret;
 };
@@ -20917,20 +21045,28 @@ Renderer.prototype.printSymbol = function (x, offset, symbol, scalex, scaley, kl
   if (!symbol) return null;
 
   if (symbol.length > 1 && symbol.indexOf(".") < 0) {
-    this.paper.openGroup();
+    this.paper.openGroup({
+      klass: klass
+    });
     var dx = 0;
 
     for (var i = 0; i < symbol.length; i++) {
       var s = symbol.charAt(i);
       ycorr = glyphs.getYCorr(s);
-      el = glyphs.printSymbol(x + dx, this.calcY(offset + ycorr), s, this.paper, klass);
+      el = glyphs.printSymbol(x + dx, this.calcY(offset + ycorr), s, this.paper, '');
 
       if (el) {
-        if (this.doRegression) this.addToRegression(el); //elemset.push(el);
-
+        if (this.doRegression) this.addToRegression(el);
         if (i < symbol.length - 1) dx += kernSymbols(s, symbol.charAt(i + 1), glyphs.getSymbolWidth(s));
       } else {
-        this.renderText(x, this.y, "no symbol:" + symbol, "debugfont", 'debug-msg', 'start');
+        this.renderText({
+          x: x,
+          y: this.y,
+          text: "no symbol:" + symbol,
+          type: "debugfont",
+          klass: 'debug-msg',
+          anchor: 'start'
+        });
       }
     }
 
@@ -20949,7 +21085,14 @@ Renderer.prototype.printSymbol = function (x, offset, symbol, scalex, scaley, kl
       if (el) {
         if (this.doRegression) this.addToRegression(el);
         return el;
-      } else this.renderText(x, this.y, "no symbol:" + symbol, "debugfont", 'debug-msg', 'start');
+      } else this.renderText({
+        x: x,
+        y: this.y,
+        text: "no symbol:" + symbol,
+        type: "debugfont",
+        klass: 'debug-msg',
+        anchor: 'start'
+      });
     }
 
     return null;
@@ -20962,9 +21105,9 @@ Renderer.prototype.scaleExistingElem = function (elem, scaleX, scaleY, x, y) {
   });
 };
 
-Renderer.prototype.printPath = function (attrs) {
+Renderer.prototype.printPath = function (attrs, params) {
   var ret = this.paper.path(attrs);
-  this.controller.recordHistory(ret, attrs.notSelectable);
+  if (!params || !params.history) this.controller.recordHistory(ret);else if (params.history === 'not-selectable') this.controller.recordHistory(ret, true);
   if (this.doRegression) this.addToRegression(ret);
   return ret;
 };
@@ -21022,20 +21165,29 @@ Renderer.prototype.calcY = function (ofs) {
 Renderer.prototype.printStave = function (startx, endx, numLines) {
   var klass = "top-line";
   this.paper.openGroup({
-    prepend: true
+    prepend: true,
+    klass: "abcjs-l1 abcjs-staff"
   }); // If there is one line, it is the B line. Otherwise, the bottom line is the E line.
 
   if (numLines === 1) {
     this.printStaveLine(startx, endx, 6, klass);
-    return;
-  }
-
-  for (var i = numLines - 1; i >= 0; i--) {
-    this.printStaveLine(startx, endx, (i + 1) * 2, klass);
-    klass = undefined;
+  } else {
+    for (var i = numLines - 1; i >= 0; i--) {
+      this.printStaveLine(startx, endx, (i + 1) * 2, klass);
+      klass = undefined;
+    }
   }
 
   var ret = this.paper.closeGroup();
+  this.controller.currentAbsEl = {
+    tuneNumber: this.controller.engraver.tuneNumber,
+    elemset: [ret],
+    abcelem: {
+      el_type: "staff",
+      startChar: -1,
+      endChar: -1
+    }
+  };
   this.controller.recordHistory(ret, true);
 };
 /**
@@ -21044,14 +21196,14 @@ Renderer.prototype.printStave = function (startx, endx, numLines) {
  */
 
 
-Renderer.prototype.addClasses = function (c, isNote) {
+Renderer.prototype.addClasses = function (c) {
   if (!this.shouldAddClasses) return "";
   var ret = [];
-  if (c.length > 0) ret.push(c);
+  if (c && c.length > 0) ret.push(c);
   if (this.lineNumber !== null && this.lineNumber !== undefined) ret.push("l" + this.lineNumber);
   if (this.measureNumber !== null && this.measureNumber !== undefined) ret.push("m" + this.measureNumber);
   if (this.voiceNumber !== null && this.voiceNumber !== undefined) ret.push("v" + this.voiceNumber);
-  if ((c.indexOf('note') >= 0 || c.indexOf('rest') >= 0 || c.indexOf('lyric') >= 0) && this.noteNumber !== null && this.noteNumber !== undefined) ret.push("n" + this.noteNumber); // add a prefix to all classes that abcjs adds.
+  if (c && (c.indexOf('note') >= 0 || c.indexOf('rest') >= 0 || c.indexOf('lyric') >= 0) && this.noteNumber !== null && this.noteNumber !== undefined) ret.push("n" + this.noteNumber); // add a prefix to all classes that abcjs adds.
 
   if (ret.length > 0) {
     ret = ret.join(' '); // Some strings are compound classes - that is, specify more than one class in a string.
@@ -21126,20 +21278,20 @@ Renderer.prototype.getTextSize = function (text, type, klass, el) {
   return size;
 };
 
-Renderer.prototype.renderText = function (x, y, text, type, klass, anchor, centerVertically, notSelectable) {
-  var hash = this.getFontAndAttr(type, klass);
-  if (anchor) hash.attr["text-anchor"] = anchor;
-  hash.attr.x = x;
-  hash.attr.y = y + 7; // TODO-PER: Not sure why the text appears to be 7 pixels off.
+Renderer.prototype.renderText = function (params) {
+  var hash = this.getFontAndAttr(params.type, params.klass);
+  if (params.anchor) hash.attr["text-anchor"] = params.anchor;
+  hash.attr.x = params.x;
+  hash.attr.y = params.y + 7; // TODO-PER: Not sure why the text appears to be 7 pixels off.
 
-  if (!centerVertically) hash.attr.dy = "0.5em";
+  if (!params.centerVertically) hash.attr.dy = "0.5em";
 
-  if (type === 'debugfont') {
-    console.log("Debug msg: " + text);
+  if (params.type === 'debugfont') {
+    console.log("Debug msg: " + params.text);
     hash.attr.stroke = "#ff0000";
   }
 
-  text = text.replace(/\n\n/g, "\n \n");
+  var text = params.text.replace(/\n\n/g, "\n \n");
   text = text.replace(/^\n/, "\xA0\n");
   var klass2 = hash.attr['class'];
 
@@ -21153,23 +21305,24 @@ Renderer.prototype.renderText = function (x, y, text, type, klass, anchor, cente
     });
   }
 
+  if (params.noClass) delete hash.attr['class'];
   var el = this.paper.text(text, hash.attr);
   var elem = el;
 
   if (hash.font.box) {
-    var size = this.getTextSize(text, type, klass); // This size already has the box factored in, so the needs to be taken into consideration.
+    var size = this.getTextSize(text, params.type, params.klass); // This size already has the box factored in, so the needs to be taken into consideration.
 
     var padding = 2;
     this.paper.rect({
-      x: x - padding,
-      y: y,
+      x: params.x - padding,
+      y: params.y,
       width: size.width - padding,
       height: size.height - 8
     });
     elem = this.closeElemSet();
   }
 
-  this.controller.recordHistory(elem, notSelectable);
+  if (!params.history) this.controller.recordHistory(elem);else if (params.history === 'not-selectable') this.controller.recordHistory(elem, true);
   if (this.doRegression) this.addToRegression(el);
   return elem;
 };
@@ -21186,11 +21339,19 @@ Renderer.prototype.skipSpaceY = function () {
 // and alignment being "start", "middle", or "end".
 
 
-Renderer.prototype.outputTextIf = function (x, str, kind, klass, marginTop, marginBottom, alignment) {
+Renderer.prototype.outputTextIf = function (x, str, kind, klass, marginTop, marginBottom, alignment, noClass) {
   if (str) {
     if (marginTop) this.moveY(marginTop);
-    var el = this.renderText(x, this.y, str, kind, klass, alignment);
-    var bb = this.getTextSize(str, kind, klass);
+    var el = this.renderText({
+      x: x,
+      y: this.y,
+      text: str,
+      type: kind,
+      klass: klass,
+      anchor: alignment,
+      noClass: noClass
+    });
+    var bb = this.getTextSize(str, kind, klass, el);
     var width = isNaN(bb.width) ? 0 : bb.width;
     var height = isNaN(bb.height) ? 0 : bb.height;
     var hash = this.getFontAndAttr(kind, klass);
@@ -22040,13 +22201,21 @@ var TempoElement;
     var tempoGroup;
     renderer.wrapInAbsElem(this.tempo, "abcjs-tempo", function () {
       renderer.createElemSet({
-        klass: "abcjs-tempo"
+        klass: renderer.addClasses("tempo")
       });
       var y = renderer.calcY(self.pitch);
       var text;
 
       if (self.tempo.preString) {
-        text = renderer.renderText(x, y, self.tempo.preString, 'tempofont', 'tempo', "start");
+        text = renderer.renderText({
+          x: x,
+          y: y,
+          text: self.tempo.preString,
+          type: 'tempofont',
+          klass: 'abcjs-tempo',
+          anchor: "start",
+          noClass: true
+        });
         var size = renderer.getTextSize(self.tempo.preString, 'tempofont', 'tempo', text);
         var preWidth = size.width;
         var charWidth = preWidth / self.tempo.preString.length; // Just get some average number to increase the spacing.
@@ -22063,7 +22232,15 @@ var TempoElement;
 
         x += self.note.w + 5;
         var str = "= " + self.tempo.bpm;
-        text = renderer.renderText(x, y, str, 'tempofont', 'tempo', "start");
+        text = renderer.renderText({
+          x: x,
+          y: y,
+          text: str,
+          type: 'tempofont',
+          klass: 'abcjs-tempo',
+          anchor: "start",
+          noClass: true
+        });
         size = renderer.getTextSize(str, 'tempofont', 'tempo', text);
         var postWidth = size.width;
         var charWidth2 = postWidth / str.length; // Just get some average number to increase the spacing.
@@ -22072,7 +22249,15 @@ var TempoElement;
       }
 
       if (self.tempo.postString) {
-        renderer.renderText(x, y, self.tempo.postString, 'tempofont', 'tempo', "start");
+        renderer.renderText({
+          x: x,
+          y: y,
+          text: self.tempo.postString,
+          type: 'tempofont',
+          klass: 'abcjs-tempo',
+          anchor: "start",
+          noClass: true
+        });
       }
 
       tempoGroup = renderer.closeElemSet();
@@ -22094,9 +22279,7 @@ var TempoElement;
       if (inGroup) group = hist.svgEl.parentNode;else if (group) {
         group.appendChild(hist.svgEl);
       }
-      var classes = hist.svgEl.getAttribute("class");
-      classes = classes.replace("abcjs-tempo", '');
-      hist.svgEl.setAttribute("class", classes);
+      hist.svgEl.setAttribute("class", '');
     }
 
     var len = renderer.controller.history.length - i - 1;
@@ -22305,7 +22488,17 @@ TieElem.prototype.draw = function (renderer, linestartx, lineendx) {
   if (this.hint) klass = "abcjs-hint";
   var fudgeY = this.fixedY ? 1.5 : 0; // TODO-PER: This just compensates for drawArc, which contains too much knowledge of ties and slurs.
 
-  renderer.drawArc(this.startX, this.endX, this.startY + fudgeY, this.endY + fudgeY, this.above, klass, this.isTie);
+  renderer.controller.currentAbsEl = {
+    tuneNumber: renderer.controller.engraver.tuneNumber,
+    elemset: [],
+    abcelem: {
+      el_type: "slur",
+      startChar: -1,
+      endChar: -1
+    }
+  };
+  var el = renderer.drawArc(this.startX, this.endX, this.startY + fudgeY, this.endY + fudgeY, this.above, klass, this.isTie);
+  renderer.controller.currentAbsEl.elemset.push(el);
 };
 
 module.exports = TieElem;
@@ -22424,6 +22617,15 @@ var TripletElem;
   TripletElem.prototype.draw = function (renderer) {
     var xTextPos;
     var durationClass = ("abcjs-d" + this.duration).replace(/\./g, "-");
+    renderer.controller.currentAbsEl = {
+      tuneNumber: renderer.controller.engraver.tuneNumber,
+      elemset: [],
+      abcelem: {
+        el_type: "triplet",
+        startChar: -1,
+        endChar: -1
+      }
+    };
     renderer.createElemSet({
       klass: renderer.addClasses('triplet ' + durationClass)
     });
@@ -22436,8 +22638,19 @@ var TripletElem;
       drawBracket(renderer, this.anchor1.x, this.startNote, this.anchor2.x + this.anchor2.w, this.endNote, this.duration);
     }
 
-    renderer.renderText(xTextPos, renderer.calcY(this.yTextPos), "" + this.number, 'tripletfont', "", "middle", true, true);
-    renderer.closeElemSet();
+    renderer.renderText({
+      x: xTextPos,
+      y: renderer.calcY(this.yTextPos),
+      text: "" + this.number,
+      type: 'tripletfont',
+      anchor: "middle",
+      centerVertically: true,
+      history: 'ignore',
+      noClass: true
+    });
+    var g = renderer.closeElemSet();
+    renderer.controller.currentAbsEl.elemset.push(g);
+    renderer.controller.recordHistory(g, true);
   };
 
   function drawLine(renderer, l, t, r, b) {
@@ -22731,7 +22944,14 @@ VoiceElement.prototype.draw = function (renderer, bartop) {
       endChar: -1,
       text: this.header
     }, 'meta-bottom extra-text', function () {
-      var textEl = renderer.renderText(renderer.padding.left, renderer.calcY(textpitch), self.header, 'voicefont', 'staff-extra voice-name', 'start');
+      var textEl = renderer.renderText({
+        x: renderer.padding.left,
+        y: renderer.calcY(textpitch),
+        text: self.header,
+        type: 'voicefont',
+        klass: 'staff-extra voice-name',
+        anchor: 'start'
+      });
       return textEl;
     });
   }
