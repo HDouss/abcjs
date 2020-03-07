@@ -3,9 +3,7 @@
 
 </head>
 <div>
-	<textarea>
-		
-	</textarea>
+	<textarea>E _E _/E D</textarea>
 <a href="#" onclick="doit();">render</a>
 </div>
 <div id="paper"></div>
@@ -18,6 +16,7 @@
 		synth.init({
 			audioContext: myContext,
 			visualObj: visualObj[0],
+			soundFontUrl:"midi/",
 			millisecondsPerMeasure: 5000
 		}).then(()=>{
 			synth.prime().then(()=>{

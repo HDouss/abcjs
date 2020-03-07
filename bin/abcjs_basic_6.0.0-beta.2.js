@@ -14543,7 +14543,7 @@ var getNote = function getNote(url, instrument, name, audioContext) {
     }
 
     xhr.onload = function (e) {
-      if (this.status === 200) {
+      if (this.status === 200 || this.status === 0) {
         audioContext.decodeAudioData(this.response, onSuccess, onFailure);
       } else {
         instrumentCache[name] = "error"; // To keep this from trying to load repeatedly.
