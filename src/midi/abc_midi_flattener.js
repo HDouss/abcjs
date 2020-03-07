@@ -602,6 +602,10 @@ var flatten;
 		var pitch = note.pitch;
 		if (note.accidental) {
 			switch(note.accidental) { // change that pitch (not other octaves) for the rest of the bar
+				case "quartersharp":
+					barAccidentals[pitch]=0.5; break;
+				case "quarterflat":
+					barAccidentals[pitch]=-0.5; break;
 				case "sharp":
 					barAccidentals[pitch]=1; break;
 				case "flat":
@@ -631,7 +635,7 @@ var flatten;
 		if (!elem.accidentals) return accidentals;
 		for (var i = 0; i < elem.accidentals.length; i++) {
 			var acc = elem.accidentals[i];
-			var d = (acc.acc === "sharp") ? 1 : (acc.acc === "natural") ?0 : -1;
+			var d = (acc.acc === "quarterflat") ? -0.5 : (acc.acc === "quartersharp") ? 0.5 : (acc.acc === "sharp") ? 1 : (acc.acc === "natural") ?0 : -1;
 
 			var lowercase = acc.note.toLowerCase();
 			var note = extractNote(lowercase.charCodeAt(0)-'c'.charCodeAt(0));
